@@ -90,7 +90,17 @@ async function run() {
       }
     });
 
-   
+    // ===== DELETE FOOD BY ID ===== (Optional)
+    app.delete('/add-food/:id', verifyJWT, async (req, res) => {
+      const { id } = req.params;
+      try {
+        const result = await foodCollection.deleteOne({ _id: new ObjectId(id) });
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: 'Failed to delete meal', err });
+      }
+    });
 
     // ===== UPDATE FOOD BY ID ===== (Optional)
     app.put('/add-food/:id', verifyJWT, async (req, res) => {
