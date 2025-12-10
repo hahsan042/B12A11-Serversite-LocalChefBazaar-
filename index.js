@@ -1,0 +1,139 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { MongoClient, ObjectId, ServerApiVersion } = require('mongodb');
+const admin = require('firebase-admin');
+
+const port = process.env.PORT || 3000;
+
+// ===== Firebase Admin Initialization =====
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf-8');
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const app = express();
+
+// ===== Middleware =====
+app.use(
+  cors({
+    origin: ['http://localhost:5173'], // your frontend URL
+    credentials: true,
+    optionsSuccessStatus: 200,
+  })
+);
+app.use(express.json());
+
+// ===== JWT Middleware =====
+const verifyJWT = async (req, res, next) => {
+  const token = req?.headers?.authorization?.split(' ')[1];
+  if (!token) return res.status(401).send({ message: 'Unauthorized Access!' });
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.tokenEmail = decoded.email;
+    next();
+  } catch (err) {
+    return res.status(401).send({ message: 'Unauthorized Access!', err });
+  }
+};
+
+// ===== MongoDB Client =====
+const client = new MongoClient(process.env.MONGODB_URI, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
+});
+
+async function run() {
+  try {
+    const db = client.db('localBazarChef');
+    const foodCollection = db.collection('add-food');
+
+    // ===== CREATE FOOD =====
+    app.post('/add-food', verifyJWT, async (req, res) => {
+      try {
+        const foodData = req.body;
+        const result = await foodCollection.insertOne(foodData);
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: 'Failed to create food', err });
+      }
+    });
+
+    // ===== READ ALL FOODS =====
+    app.get('/add-food', async (req, res) => {
+      try {
+        const foods = await foodCollection.find().toArray();
+        res.send(foods);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: 'Failed to fetch foods', err });
+      }
+    });
+
+    // ===== READ FOOD BY ID =====
+    app.get('/add-food/:id', async (req, res) => {
+      const { id } = req.params;
+      try {
+        const food = await foodCollection.findOne({ _id: new ObjectId(id) });
+        if (!food) return res.status(404).send({ message: 'Meal not found' });
+        res.send(food);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: 'Failed to fetch meal', err });
+      }
+    });
+
+    // ===== DELETE FOOD BY ID ===== (Optional)
+    app.delete('/add-food/:id', verifyJWT, async (req, res) => {
+      const { id } = req.params;
+      try {
+        const result = await foodCollection.deleteOne({ _id: new ObjectId(id) });
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: 'Failed to delete meal', err });
+      }
+    });
+
+    // ===== UPDATE FOOD BY ID ===== (Optional)
+    app.put('/add-food/:id', verifyJWT, async (req, res) => {
+      const { id } = req.params;
+      const updatedData = req.body;
+      try {
+        const result = await foodCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: 'Failed to update meal', err });
+      }
+    });
+
+    // Ping MongoDB to check connection
+    await client.db('admin').command({ ping: 1 });
+    console.log('MongoDB connected successfully!');
+  } finally {
+    // Do nothing
+  }
+}
+
+run().catch(console.dir);
+
+// ===== Default Route =====
+app.get('/', (req, res) => {
+  res.send('Hello from Server...');
+});
+
+// ===== Start Server =====
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
