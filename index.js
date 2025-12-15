@@ -92,6 +92,106 @@ async function run() {
       }
     });
 
+    // ===== ORDERS API =====
+app.post('/orders', verifyJWT, async (req, res) => {
+  try {
+    const orderData = req.body;
+
+    orderData.orderTime = new Date();
+    orderData.orderStatus = 'pending';     // chef accept করবে
+    orderData.paymentStatus = 'pending';   // payment এখনো হয়নি
+
+    const ordersCollection = client
+      .db('localBazarChef')
+      .collection('order_collection');
+
+    const result = await ordersCollection.insertOne(orderData);
+    res.send({ success: true, result });
+  } catch (err) {
+    res.status(500).send({ message: 'Failed to place order' });
+  }
+});
+
+app.patch('/orders/:id/accept', verifyJWT, async (req, res) => {
+  const { id } = req.params;
+
+  const ordersCollection = client
+    .db('localBazarChef')
+    .collection('order_collection');
+
+  const result = await ordersCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { orderStatus: 'accepted' } }
+  );
+
+  res.send(result);
+});
+app.patch('/orders/:id/pay', verifyJWT, async (req, res) => {
+  const { id } = req.params;
+
+  const ordersCollection = client
+    .db('localBazarChef')
+    .collection('order_collection');
+
+  const result = await ordersCollection.updateOne(
+    { _id: new ObjectId(id) },
+    {
+      $set: {
+        paymentStatus: 'paid',
+        paidAt: new Date(),
+      },
+    }
+  );
+
+  res.send(result);
+});
+
+
+// GET orders by user email
+app.get('/orders', verifyJWT, async (req, res) => {
+  try {
+    const email = req.query.email;
+    if (email !== req.tokenEmail)
+      return res.status(403).send({ message: 'Forbidden' });
+
+    const ordersCollection = client.db('localBazarChef').collection('order_collection');
+    const orders = await ordersCollection.find({ userEmail: email }).toArray();
+    res.send(orders);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: 'Failed to fetch orders', err });
+  }
+});
+
+
+// ===== DELETE ORDER =====
+app.delete('/orders/:id', verifyJWT, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const ordersCollection = client.db('localBazarChef').collection('order_collection');
+
+    // Optional: Ensure that only the user who placed the order can delete it
+    const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
+    if (!order) return res.status(404).send({ message: 'Order not found' });
+
+    // If you want: only allow deletion if user is owner or admin
+    if (order.userEmail !== req.tokenEmail) {
+      return res.status(403).send({ message: 'Forbidden: You can only cancel your own order' });
+    }
+
+    const result = await ordersCollection.deleteOne({ _id: new ObjectId(id) });
+
+    res.send({ success: true, message: 'Order cancelled successfully', result });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ success: false, message: 'Failed to delete order', err });
+  }
+});
+
+
+
+
     // ===== REVIEWS API =====
     // Add review
 app.post('/reviews', verifyJWT, async (req, res) => {
@@ -157,6 +257,55 @@ app.post('/reviews', verifyJWT, async (req, res) => {
         res.status(500).send({ message: 'Failed to add favorite', err });
       }
     });
+    // ===== GET MY INVENTORY =====
+app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    // JWT থেকে verify করা email match কর
+    if (email !== req.tokenEmail) {
+      return res.status(403).send({ message: 'Forbidden: Cannot access other user inventory' });
+    }
+
+    const db = client.db('localBazarChef');
+    const foodCollection = db.collection('add-food');
+
+    const meals = await foodCollection.find({ userEmail: email }).toArray();
+
+    res.send(meals);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: 'Failed to fetch inventory', err });
+  }
+});
+app.delete('/add-food/:id', verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const food = await foodCollection.findOne({ _id: new ObjectId(id) });
+    if (!food) return res.status(404).send({ message: 'Food not found' });
+
+    const result = await foodCollection.deleteOne({ _id: new ObjectId(id) });
+    res.send({ success: true, message: 'Food deleted', result });
+  } catch (err) {
+    res.status(500).send({ success: false, message: 'Failed to delete food', err });
+  }
+});
+
+app.patch('/add-food/:id', verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  const updateData = req.body;
+  try {
+    const result = await foodCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+    res.send({ success: true, result });
+  } catch (err) {
+    res.status(500).send({ success: false, message: 'Failed to update food', err });
+  }
+});
+
+
 
     // ===== Ping MongoDB =====
     await client.db('admin').command({ ping: 1 });
@@ -177,3 +326,5 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+
+
