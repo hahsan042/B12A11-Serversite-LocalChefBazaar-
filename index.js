@@ -1,3 +1,5 @@
+
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -19,9 +21,8 @@ const app = express();
 // ===== Middleware =====
 app.use(
   cors({
-    origin: ['http://localhost:5173'],
+    origin: ['http://localhost:5173'], // FE URL
     credentials: true,
-    optionsSuccessStatus: 200,
   })
 );
 app.use(express.json());
@@ -42,11 +43,7 @@ const verifyJWT = async (req, res, next) => {
 
 // ===== MongoDB Client =====
 const client = new MongoClient(process.env.MONGODB_URI, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
+  serverApi: { version: ServerApiVersion.v1 },
 });
 
 async function run() {
@@ -55,263 +52,237 @@ async function run() {
     const foodCollection = db.collection('add-food');
     const reviewsCollection = db.collection('reviews');
     const favoritesCollection = db.collection('favorites');
+    const ordersCollection = db.collection('order_collection');
 
-    // ===== CREATE FOOD =====
+    // ===== FOODS =====
     app.post('/add-food', verifyJWT, async (req, res) => {
       try {
         const foodData = req.body;
         const result = await foodCollection.insertOne(foodData);
         res.send(result);
       } catch (err) {
-        console.error(err);
         res.status(500).send({ message: 'Failed to create food', err });
       }
     });
 
-    // ===== READ ALL FOODS =====
     app.get('/add-food', async (req, res) => {
       try {
         const foods = await foodCollection.find().toArray();
         res.send(foods);
       } catch (err) {
-        console.error(err);
         res.status(500).send({ message: 'Failed to fetch foods', err });
       }
     });
 
-    // ===== READ FOOD BY ID =====
     app.get('/add-food/:id', async (req, res) => {
-      const { id } = req.params;
       try {
-        const food = await foodCollection.findOne({ _id: new ObjectId(id) });
+        const food = await foodCollection.findOne({ _id: new ObjectId(req.params.id) });
         if (!food) return res.status(404).send({ message: 'Meal not found' });
         res.send(food);
       } catch (err) {
-        console.error(err);
         res.status(500).send({ message: 'Failed to fetch meal', err });
       }
     });
 
-    // ===== ORDERS API =====
-app.post('/orders', verifyJWT, async (req, res) => {
-  try {
-    const orderData = req.body;
+    app.patch('/add-food/:id', verifyJWT, async (req, res) => {
+      try {
+        const result = await foodCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: req.body }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to update food', err });
+      }
+    });
 
-    orderData.orderTime = new Date();
-    orderData.orderStatus = 'pending';     // chef accept করবে
-    orderData.paymentStatus = 'pending';   // payment এখনো হয়নি
+    app.delete('/add-food/:id', verifyJWT, async (req, res) => {
+      try {
+        const result = await foodCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to delete food', err });
+      }
+    });
 
-    const ordersCollection = client
-      .db('localBazarChef')
-      .collection('order_collection');
+    // ===== REVIEWS =====
+    app.post('/reviews', verifyJWT, async (req, res) => {
+      try {
+        const reviewData = req.body;
+        reviewData.date = new Date();
+        const result = await reviewsCollection.insertOne(reviewData);
 
-    const result = await ordersCollection.insertOne(orderData);
-    res.send({ success: true, result });
-  } catch (err) {
-    res.status(500).send({ message: 'Failed to place order' });
-  }
-});
+        // Update average rating
+        const reviews = await reviewsCollection.find({ foodId: reviewData.foodId }).toArray();
+        const avgRating =
+          reviews.length > 0 ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length : 0;
 
-app.patch('/orders/:id/accept', verifyJWT, async (req, res) => {
-  const { id } = req.params;
+        await foodCollection.updateOne(
+          { _id: new ObjectId(reviewData.foodId) },
+          { $set: { rating: avgRating } }
+        );
 
-  const ordersCollection = client
-    .db('localBazarChef')
-    .collection('order_collection');
-
-  const result = await ordersCollection.updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { orderStatus: 'accepted' } }
-  );
-
-  res.send(result);
-});
-app.patch('/orders/:id/pay', verifyJWT, async (req, res) => {
-  const { id } = req.params;
-
-  const ordersCollection = client
-    .db('localBazarChef')
-    .collection('order_collection');
-
-  const result = await ordersCollection.updateOne(
-    { _id: new ObjectId(id) },
-    {
-      $set: {
-        paymentStatus: 'paid',
-        paidAt: new Date(),
-      },
-    }
-  );
-
-  res.send(result);
-});
-
-
-// GET orders by user email
-app.get('/orders', verifyJWT, async (req, res) => {
-  try {
-    const email = req.query.email;
-    if (email !== req.tokenEmail)
-      return res.status(403).send({ message: 'Forbidden' });
-
-    const ordersCollection = client.db('localBazarChef').collection('order_collection');
-    const orders = await ordersCollection.find({ userEmail: email }).toArray();
-    res.send(orders);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: 'Failed to fetch orders', err });
-  }
-});
-
-
-// ===== DELETE ORDER =====
-app.delete('/orders/:id', verifyJWT, async (req, res) => {
-  const { id } = req.params;
-
-  try {
-    const ordersCollection = client.db('localBazarChef').collection('order_collection');
-
-    // Optional: Ensure that only the user who placed the order can delete it
-    const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
-    if (!order) return res.status(404).send({ message: 'Order not found' });
-
-    // If you want: only allow deletion if user is owner or admin
-    if (order.userEmail !== req.tokenEmail) {
-      return res.status(403).send({ message: 'Forbidden: You can only cancel your own order' });
-    }
-
-    const result = await ordersCollection.deleteOne({ _id: new ObjectId(id) });
-
-    res.send({ success: true, message: 'Order cancelled successfully', result });
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ success: false, message: 'Failed to delete order', err });
-  }
-});
-
-
-
-
-    // ===== REVIEWS API =====
-    // Add review
-app.post('/reviews', verifyJWT, async (req, res) => {
-  try {
-    const reviewData = req.body;
-    reviewData.date = new Date(); // Add current date
-
-    // 1️⃣ Insert review
-    const result = await reviewsCollection.insertOne(reviewData);
-
-    // 2️⃣ Update average rating
-    const reviews = await reviewsCollection.find({ foodId: reviewData.foodId }).toArray();
-  const avgRating =
-  reviews.length > 0
-    ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
-    : 0;
-
-
-    await foodCollection.updateOne(
-      { _id: new ObjectId(reviewData.foodId) },
-      { $set: { rating: avgRating } }
-    );
-
-    // 3️⃣ Send response
-    res.send({ success: true, result, avgRating });
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: 'Failed to submit review', err });
-  }
-});
-
+        res.send({ success: true, result, avgRating });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to submit review', err });
+      }
+    });
 
     // Get all reviews for a specific meal
     app.get('/reviews/:foodId', async (req, res) => {
-      const { foodId } = req.params;
       try {
         const reviews = await reviewsCollection
-          .find({ foodId })
+          .find({ foodId: req.params.foodId })
           .sort({ date: -1 })
           .toArray();
         res.send(reviews);
       } catch (err) {
-        console.error(err);
         res.status(500).send({ message: 'Failed to fetch reviews', err });
       }
     });
 
-    // ===== FAVORITES API =====
+    // Get reviews by user email
+    app.get('/reviews', verifyJWT, async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (email !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden' });
+
+        const reviews = await reviewsCollection.find({ reviewerEmail: email }).sort({ date: -1 }).toArray();
+
+        // Attach foodName to each review
+        const foodIds = reviews.map(r => new ObjectId(r.foodId));
+        const foods = await foodCollection.find({ _id: { $in: foodIds } }).toArray();
+        const foodMap = {};
+        foods.forEach(f => (foodMap[f._id.toString()] = f.foodName));
+
+        const reviewsWithFoodName = reviews.map(r => ({
+          ...r,
+          foodName: foodMap[r.foodId] || "Unknown Food",
+        }));
+
+        res.send(reviewsWithFoodName);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch reviews', err });
+      }
+    });
+
+    // Delete review
+    app.delete('/reviews/:id', verifyJWT, async (req, res) => {
+      try {
+        const review = await reviewsCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!review) return res.status(404).send({ message: 'Review not found' });
+        if (review.reviewerEmail !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden' });
+
+        await reviewsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        res.send({ success: true, message: 'Review deleted' });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to delete review', err });
+      }
+    });
+
+    // ===== FAVORITES =====
     app.post('/favorites', verifyJWT, async (req, res) => {
       try {
         const { userEmail, mealId } = req.body;
-
-        // Check if already in favorites
         const exists = await favoritesCollection.findOne({ userEmail, mealId });
-        if (exists)
-          return res.send({ success: false, message: 'Meal already in favorites' });
+        if (exists) return res.send({ success: false, message: 'Meal already in favorites' });
 
         req.body.addedTime = new Date();
         const result = await favoritesCollection.insertOne(req.body);
         res.send({ success: true, result });
       } catch (err) {
-        console.error(err);
         res.status(500).send({ message: 'Failed to add favorite', err });
       }
     });
-    // ===== GET MY INVENTORY =====
-app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
-  try {
-    const { email } = req.params;
 
-    // JWT থেকে verify করা email match কর
-    if (email !== req.tokenEmail) {
-      return res.status(403).send({ message: 'Forbidden: Cannot access other user inventory' });
-    }
+    app.get('/favorites', verifyJWT, async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (email !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden' });
 
-    const db = client.db('localBazarChef');
-    const foodCollection = db.collection('add-food');
+        const favorites = await favoritesCollection.find({ userEmail: email }).sort({ addedTime: -1 }).toArray();
+        res.send(favorites);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch favorites', err });
+      }
+    });
 
-    const meals = await foodCollection.find({ userEmail: email }).toArray();
+    app.delete('/favorites/:id', verifyJWT, async (req, res) => {
+      try {
+        const favorite = await favoritesCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!favorite) return res.status(404).send({ message: 'Favorite not found' });
+        if (favorite.userEmail !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden' });
 
-    res.send(meals);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: 'Failed to fetch inventory', err });
-  }
-});
-app.delete('/add-food/:id', verifyJWT, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const food = await foodCollection.findOne({ _id: new ObjectId(id) });
-    if (!food) return res.status(404).send({ message: 'Food not found' });
+        await favoritesCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        res.send({ success: true, message: 'Favorite deleted' });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to delete favorite', err });
+      }
+    });
 
-    const result = await foodCollection.deleteOne({ _id: new ObjectId(id) });
-    res.send({ success: true, message: 'Food deleted', result });
-  } catch (err) {
-    res.status(500).send({ success: false, message: 'Failed to delete food', err });
-  }
-});
+    // ===== ORDERS =====
+    app.post('/orders', verifyJWT, async (req, res) => {
+      try {
+        const orderData = req.body;
+        orderData.orderTime = new Date();
+        orderData.orderStatus = 'pending';
+        orderData.paymentStatus = 'pending';
 
-app.patch('/add-food/:id', verifyJWT, async (req, res) => {
-  const { id } = req.params;
-  const updateData = req.body;
-  try {
-    const result = await foodCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: updateData }
-    );
-    res.send({ success: true, result });
-  } catch (err) {
-    res.status(500).send({ success: false, message: 'Failed to update food', err });
-  }
-});
+        const result = await ordersCollection.insertOne(orderData);
+        res.send({ success: true, result });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to place order', err });
+      }
+    });
 
+    app.get('/orders', verifyJWT, async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (email !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden' });
 
+        const orders = await ordersCollection.find({ userEmail: email }).toArray();
+        res.send(orders);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch orders', err });
+      }
+    });
+
+    app.patch('/orders/:id/accept', verifyJWT, async (req, res) => {
+      const { id } = req.params;
+      const result = await ordersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { orderStatus: 'accepted' } }
+      );
+      res.send(result);
+    });
+
+    app.patch('/orders/:id/pay', verifyJWT, async (req, res) => {
+      const { id } = req.params;
+      const result = await ordersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { paymentStatus: 'paid', paidAt: new Date() } }
+      );
+      res.send(result);
+    });
+
+    app.delete('/orders/:id', verifyJWT, async (req, res) => {
+      try {
+        const order = await ordersCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!order) return res.status(404).send({ message: 'Order not found' });
+        if (order.userEmail !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden' });
+
+        await ordersCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        res.send({ success: true, message: 'Order deleted' });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to delete order', err });
+      }
+    });
 
     // ===== Ping MongoDB =====
     await client.db('admin').command({ ping: 1 });
     console.log('MongoDB connected successfully!');
   } finally {
-    // nothing
+    // Nothing
   }
 }
 
@@ -326,5 +297,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
-
-
