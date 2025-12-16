@@ -53,7 +53,7 @@ async function run() {
     const reviewsCollection = db.collection('reviews');
     const favoritesCollection = db.collection('favorites');
     const ordersCollection = db.collection('order_collection');
-
+    const usersCollection = db.collection('users')
     // ===== FOODS =====
     app.post('/add-food', verifyJWT, async (req, res) => {
       try {
@@ -104,6 +104,26 @@ async function run() {
         res.status(500).send({ message: 'Failed to delete food', err });
       }
     });
+
+    // ===== MY INVENTORY =====
+app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    // JWT email match check
+    if (email !== req.tokenEmail) {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+
+    const meals = await foodCollection.find({ userEmail: email }).toArray();
+
+    res.send(meals);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: 'Failed to fetch inventory' });
+  }
+});
+
 
     // ===== REVIEWS =====
     app.post('/reviews', verifyJWT, async (req, res) => {
@@ -277,6 +297,59 @@ async function run() {
         res.status(500).send({ message: 'Failed to delete order', err });
       }
     });
+    // save or update a user in db
+app.post('/users', async (req, res) => {
+  try {
+    const userData = req.body;
+
+    // check existing user by email
+    const existingUser = await usersCollection.findOne({
+      email: userData.email,
+    });
+
+    if (existingUser) {
+      return res.send({
+        success: true,
+        message: 'User already exists',
+        user: existingUser,
+      });
+    }
+
+    // insert new user
+    const result = await usersCollection.insertOne({
+      ...userData,
+      role: userData.role || 'user',
+      status: userData.status || 'active',
+      createdAt: new Date(),
+    });
+
+    res.send({
+      success: true,
+      insertedId: result.insertedId,
+    });
+  } catch (error) {
+    res.status(500).send({
+      success: false,
+      message: 'Failed to create user',
+      error,
+    });
+  }
+});
+
+app.get('/user/role/:email', verifyJWT, async (req, res) => {
+  const email = req.params.email
+
+  if (email !== req.tokenEmail) {
+    return res.status(403).send({ message: 'Forbidden access' })
+  }
+
+  const user = await usersCollection.findOne({ email })
+
+  res.send({ role: user?.role || 'user' })
+})
+
+
+
 
     // ===== Ping MongoDB =====
     await client.db('admin').command({ ping: 1 });
