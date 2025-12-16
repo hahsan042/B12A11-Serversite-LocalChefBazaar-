@@ -1,6 +1,7 @@
 
 
 require('dotenv').config();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId, ServerApiVersion } = require('mongodb');
@@ -21,7 +22,8 @@ const app = express();
 // ===== Middleware =====
 app.use(
   cors({
-    origin: ['http://localhost:5173'], // FE URL
+  origin: [process.env.CLIENT_DOMAIN],
+
     credentials: true,
   })
 );
@@ -53,7 +55,8 @@ async function run() {
     const reviewsCollection = db.collection('reviews');
     const favoritesCollection = db.collection('favorites');
     const ordersCollection = db.collection('order_collection');
-    const usersCollection = db.collection('users')
+    const usersCollection = db.collection('users');
+
     // ===== FOODS =====
     app.post('/add-food', verifyJWT, async (req, res) => {
       try {
@@ -106,24 +109,17 @@ async function run() {
     });
 
     // ===== MY INVENTORY =====
-app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
-  try {
-    const { email } = req.params;
+    app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
+      try {
+        const { email } = req.params;
+        if (email !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden access' });
 
-    // JWT email match check
-    if (email !== req.tokenEmail) {
-      return res.status(403).send({ message: 'Forbidden access' });
-    }
-
-    const meals = await foodCollection.find({ userEmail: email }).toArray();
-
-    res.send(meals);
-  } catch (error) {
-    console.error(error);
-    res.status(500).send({ message: 'Failed to fetch inventory' });
-  }
-});
-
+        const meals = await foodCollection.find({ userEmail: email }).toArray();
+        res.send(meals);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch inventory', err });
+      }
+    });
 
     // ===== REVIEWS =====
     app.post('/reviews', verifyJWT, async (req, res) => {
@@ -132,10 +128,8 @@ app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
         reviewData.date = new Date();
         const result = await reviewsCollection.insertOne(reviewData);
 
-        // Update average rating
         const reviews = await reviewsCollection.find({ foodId: reviewData.foodId }).toArray();
-        const avgRating =
-          reviews.length > 0 ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length : 0;
+        const avgRating = reviews.length > 0 ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length : 0;
 
         await foodCollection.updateOne(
           { _id: new ObjectId(reviewData.foodId) },
@@ -148,20 +142,15 @@ app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
       }
     });
 
-    // Get all reviews for a specific meal
     app.get('/reviews/:foodId', async (req, res) => {
       try {
-        const reviews = await reviewsCollection
-          .find({ foodId: req.params.foodId })
-          .sort({ date: -1 })
-          .toArray();
+        const reviews = await reviewsCollection.find({ foodId: req.params.foodId }).sort({ date: -1 }).toArray();
         res.send(reviews);
       } catch (err) {
         res.status(500).send({ message: 'Failed to fetch reviews', err });
       }
     });
 
-    // Get reviews by user email
     app.get('/reviews', verifyJWT, async (req, res) => {
       try {
         const email = req.query.email;
@@ -169,7 +158,6 @@ app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
 
         const reviews = await reviewsCollection.find({ reviewerEmail: email }).sort({ date: -1 }).toArray();
 
-        // Attach foodName to each review
         const foodIds = reviews.map(r => new ObjectId(r.foodId));
         const foods = await foodCollection.find({ _id: { $in: foodIds } }).toArray();
         const foodMap = {};
@@ -186,7 +174,6 @@ app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
       }
     });
 
-    // Delete review
     app.delete('/reviews/:id', verifyJWT, async (req, res) => {
       try {
         const review = await reviewsCollection.findOne({ _id: new ObjectId(req.params.id) });
@@ -267,86 +254,221 @@ app.get('/my-inventory/:email', verifyJWT, async (req, res) => {
       }
     });
 
-    app.patch('/orders/:id/accept', verifyJWT, async (req, res) => {
-      const { id } = req.params;
-      const result = await ordersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { orderStatus: 'accepted' } }
-      );
-      res.send(result);
-    });
-
-    app.patch('/orders/:id/pay', verifyJWT, async (req, res) => {
-      const { id } = req.params;
-      const result = await ordersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { paymentStatus: 'paid', paidAt: new Date() } }
-      );
-      res.send(result);
-    });
-
-    app.delete('/orders/:id', verifyJWT, async (req, res) => {
+    // ===== UPDATE ORDER STATUS (Cancel/Accept/Deliver) =====
+    app.patch('/orders/:id/status', verifyJWT, async (req, res) => {
       try {
-        const order = await ordersCollection.findOne({ _id: new ObjectId(req.params.id) });
-        if (!order) return res.status(404).send({ message: 'Order not found' });
-        if (order.userEmail !== req.tokenEmail) return res.status(403).send({ message: 'Forbidden' });
+        const { id } = req.params;
+        const { status } = req.body; // 'cancelled', 'accepted', 'delivered'
 
-        await ordersCollection.deleteOne({ _id: new ObjectId(req.params.id) });
-        res.send({ success: true, message: 'Order deleted' });
+        const validStatus = ['accepted','cancelled','delivered'];
+        if(!validStatus.includes(status)) return res.status(400).send({message:'Invalid status'});
+
+        const order = await ordersCollection.findOne({_id: new ObjectId(id)});
+        if(!order) return res.status(404).send({message:'Order not found'});
+
+        // RULES
+        if(['cancelled','delivered'].includes(order.orderStatus)){
+          return res.status(400).send({message:'Order already closed'});
+        }
+        if(status==='delivered' && order.orderStatus!=='accepted'){
+          return res.status(400).send({message:'Order must be accepted first'});
+        }
+
+        const result = await ordersCollection.updateOne(
+          {_id: new ObjectId(id)},
+          {$set:{orderStatus:status}}
+        );
+
+        res.send({success:true,result});
       } catch (err) {
-        res.status(500).send({ message: 'Failed to delete order', err });
+        res.status(500).send({message:'Failed to update order status', err});
       }
     });
-    // save or update a user in db
-app.post('/users', async (req, res) => {
+
+    // ===== PAYMENT =====
+    app.patch('/orders/:id/pay', verifyJWT, async (req,res)=>{
+      try{
+        const {id} = req.params;
+        const result = await ordersCollection.updateOne(
+          {_id:new ObjectId(id)},
+          {$set:{paymentStatus:'paid', paidAt: new Date()}}
+        );
+        res.send({success:true,result});
+      }catch(err){
+        res.status(500).send({message:'Failed to update payment', err});
+      }
+    });
+
+    // ===== DELETE ORDER =====
+    app.delete('/orders/:id', verifyJWT, async (req,res)=>{
+      try{
+        const order = await ordersCollection.findOne({_id:new ObjectId(req.params.id)});
+        if(!order) return res.status(404).send({message:'Order not found'});
+        if(order.userEmail !== req.tokenEmail) return res.status(403).send({message:'Forbidden'});
+
+        await ordersCollection.deleteOne({_id:new ObjectId(req.params.id)});
+        res.send({success:true, message:'Order deleted'});
+      }catch(err){
+        res.status(500).send({message:'Failed to delete order', err});
+      }
+    });
+
+    // ===== USERS =====
+    app.post('/users', async (req,res)=>{
+      try{
+        const userData = req.body;
+        const existingUser = await usersCollection.findOne({email:userData.email});
+        if(existingUser){
+          return res.send({success:true, message:'User already exists', user:existingUser});
+        }
+        const result = await usersCollection.insertOne({
+          ...userData,
+          role:userData.role || 'user',
+          status:userData.status || 'active',
+          createdAt:new Date()
+        });
+        res.send({success:true, insertedId: result.insertedId});
+      }catch(err){
+        res.status(500).send({success:false,message:'Failed to create user', err});
+      }
+    });
+     app.get('/users', verifyJWT, async (req, res) => {
+      try {
+        const requester = await usersCollection.findOne({ email: req.tokenEmail });
+        if (!requester || requester.role !== 'admin') return res.status(403).send({ message: 'Forbidden' });
+        const users = await usersCollection.find().toArray();
+        res.send(users);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch users', err });
+      }
+    });
+
+
+    app.get('/user/role/:email', verifyJWT, async (req,res)=>{
+      const email = req.params.email;
+      if(email !== req.tokenEmail) return res.status(403).send({message:'Forbidden access'});
+
+      const user = await usersCollection.findOne({email});
+      res.send({role: user?.role || 'user'});
+    });
+
+    app.patch('/users/:id/role', verifyJWT, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { role } = req.body;
+        if (!role || !['user', 'chef', 'admin'].includes(role)) return res.status(400).send({ message: 'Invalid role' });
+
+        const currentUser = await usersCollection.findOne({ email: req.tokenEmail });
+        if (!currentUser || currentUser.role !== 'admin') return res.status(403).send({ message: 'Only admin can update roles' });
+
+        const targetUser = await usersCollection.findOne({ _id: new ObjectId(id) });
+        if (!targetUser) return res.status(404).send({ message: 'User not found' });
+
+        await usersCollection.updateOne({ _id: new ObjectId(id) }, { $set: { role } });
+        res.send({ success: true, message: `User role updated to ${role}` });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to update user role', err });
+      }
+    });
+
+    app.patch('/users/:id/fraud', verifyJWT, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+        if (!user) return res.status(404).send({ message: 'User not found' });
+        if (user.role === 'admin') return res.status(403).send({ message: 'Cannot mark admin as fraud' });
+        if (user.status === 'fraud') return res.status(400).send({ message: 'User already marked as fraud' });
+
+        await usersCollection.updateOne({ _id: new ObjectId(id) }, { $set: { status: 'fraud' } });
+        res.send({ success: true, message: 'User marked as fraud' });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to update user status', err });
+      }
+    });
+
+    // ===== CHEF ORDERS =====
+    app.get('/chef/orders', verifyJWT, async (req,res)=>{
+      try{
+        const chefId = req.query.chefId;
+        if(!chefId) return res.status(400).send({message:'chefId required'});
+
+        const orders = await ordersCollection.find({chefId}).sort({orderTime:-1}).toArray();
+        res.send(orders);
+      }catch(err){
+        res.status(500).send({message:'Failed to fetch chef orders', err});
+      }
+    });
+
+    
+
+// app.post('/create-checkout-session', async (req, res) => {
+//   try {
+//     const paymentInfo = req.body;
+//     console.log('Payment info received:', paymentInfo);
+
+//     const session = await stripe.checkout.sessions.create({
+//       payment_method_types: ['card'],
+//       line_items: [
+//         {
+//           price_data: {
+//             currency: 'usd',
+//             product_data: {
+//               name: paymentInfo.mealName,
+//               images: [paymentInfo.mealImage], // ✅ FIXED
+//             },
+//             unit_amount: paymentInfo.amount * 100,
+//           },
+//           quantity: paymentInfo.quantity || 1,
+//         },
+//       ],
+//       customer_email: paymentInfo.customer?.email,
+//       mode: 'payment',
+//       success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+//       cancel_url: `${process.env.CLIENT_DOMAIN}/dashboard/my-orders`,
+//     });
+
+//     res.json({ url: session.url });
+//   } catch (err) {
+//     console.error('Stripe checkout error:', err);
+//     res.status(500).send({ message: err.message });
+//   }
+// });
+// create-checkout-session
+app.post('/create-checkout-session', async (req, res) => {
   try {
-    const userData = req.body;
+    const paymentInfo = req.body;
 
-    // check existing user by email
-    const existingUser = await usersCollection.findOne({
-      email: userData.email,
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: paymentInfo.mealName,
+              images: [paymentInfo.mealImage],
+            },
+            unit_amount: paymentInfo.amount * 100,
+          },
+          quantity: paymentInfo.quantity || 1,
+        },
+      ],
+      customer_email: paymentInfo.customer?.email,
+      mode: 'payment',
+      success_url: `${process.env.CLIENT_DOMAIN}/payment-success?orderId=${paymentInfo.orderId}`, // ✅ orderId path
+      cancel_url: `${process.env.CLIENT_DOMAIN}/dashboard/my-orders`,
     });
 
-    if (existingUser) {
-      return res.send({
-        success: true,
-        message: 'User already exists',
-        user: existingUser,
-      });
-    }
-
-    // insert new user
-    const result = await usersCollection.insertOne({
-      ...userData,
-      role: userData.role || 'user',
-      status: userData.status || 'active',
-      createdAt: new Date(),
-    });
-
-    res.send({
-      success: true,
-      insertedId: result.insertedId,
-    });
-  } catch (error) {
-    res.status(500).send({
-      success: false,
-      message: 'Failed to create user',
-      error,
-    });
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: err.message });
   }
 });
 
-app.get('/user/role/:email', verifyJWT, async (req, res) => {
-  const email = req.params.email
+//======================
 
-  if (email !== req.tokenEmail) {
-    return res.status(403).send({ message: 'Forbidden access' })
-  }
 
-  const user = await usersCollection.findOne({ email })
-
-  res.send({ role: user?.role || 'user' })
-})
 
 
 
@@ -354,6 +476,7 @@ app.get('/user/role/:email', verifyJWT, async (req, res) => {
     // ===== Ping MongoDB =====
     await client.db('admin').command({ ping: 1 });
     console.log('MongoDB connected successfully!');
+
   } finally {
     // Nothing
   }
@@ -370,3 +493,4 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+
