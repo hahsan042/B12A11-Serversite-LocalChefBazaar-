@@ -56,6 +56,8 @@ async function run() {
     const favoritesCollection = db.collection('favorites');
     const ordersCollection = db.collection('order_collection');
     const usersCollection = db.collection('users');
+    const requestsCollection = db.collection('requests');
+
 
     // ===== FOODS =====
     app.post('/add-food', verifyJWT, async (req, res) => {
@@ -68,14 +70,29 @@ async function run() {
       }
     });
 
+    // app.get('/add-food', async (req, res) => {
+    //   try {
+    //     const foods = await foodCollection.find().toArray();
+    //     res.send(foods);
+    //   } catch (err) {
+    //     res.status(500).send({ message: 'Failed to fetch foods', err });
+    //   }
+    // });
     app.get('/add-food', async (req, res) => {
-      try {
-        const foods = await foodCollection.find().toArray();
-        res.send(foods);
-      } catch (err) {
-        res.status(500).send({ message: 'Failed to fetch foods', err });
-      }
-    });
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const totalCount = await foodCollection.countDocuments();
+    const foods = await foodCollection.find().skip(skip).limit(limit).toArray();
+
+    res.send({ meals: foods, totalCount });
+  } catch (err) {
+    res.status(500).send({ message: 'Failed to fetch foods', err });
+  }
+});
+
 
     app.get('/add-food/:id', async (req, res) => {
       try {
@@ -467,6 +484,181 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 //======================
+
+// GET all requests
+app.post("/requests", verifyJWT, async (req, res) => {
+  try {
+    const requestData = req.body;
+
+    // Check if user already has pending request
+    const existingRequest = await requestsCollection.findOne({ userEmail: requestData.userEmail, requestStatus: "pending" });
+    if (existingRequest) {
+      return res.status(400).send({ message: "You already have a pending request" });
+    }
+
+    requestData.requestTime = new Date();
+    requestData.requestStatus = "pending";
+
+    const result = await requestsCollection.insertOne(requestData);
+    res.send({ success: true, result });
+  } catch (err) {
+    res.status(500).send({ message: "Failed to submit request", err });
+  }
+});
+
+
+app.get("/requests", verifyJWT, async (req, res) => {
+  try {
+    const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
+    if (adminUser.role !== "admin") return res.status(403).send({ message: "Forbidden" });
+
+    const requests = await requestsCollection.find().sort({ requestTime: -1 }).toArray();
+    res.send(requests);
+  } catch (err) {
+    res.status(500).send({ message: "Failed to fetch requests", err });
+  }
+});
+
+// PATCH accept request
+app.patch("/requests/:id/accept", verifyJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { requestType } = req.body;
+
+    const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
+    if (adminUser.role !== "admin") return res.status(403).send({ message: "Forbidden" });
+
+    const request = await requestsCollection.findOne({ _id: new ObjectId(id) });
+    if (!request || request.requestStatus !== "pending") return res.status(400).send({ message: "Invalid request" });
+
+    // Update user role
+    let updateData = {};
+    if (requestType === "chef") {
+      const chefId = "chef-" + Math.floor(1000 + Math.random() * 9000);
+      updateData = { role: "chef", chefId };
+    } else if (requestType === "admin") {
+      updateData = { role: "admin" };
+    }
+
+    await usersCollection.updateOne({ email: request.userEmail }, { $set: updateData });
+    await requestsCollection.updateOne({ _id: new ObjectId(id) }, { $set: { requestStatus: "approved" } });
+
+    res.send({ success: true });
+  } catch (err) {
+    res.status(500).send({ message: "Failed to approve request", err });
+  }
+});
+
+// PATCH reject request
+app.patch("/requests/:id/reject", verifyJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
+    if (adminUser.role !== "admin") return res.status(403).send({ message: "Forbidden" });
+
+    await requestsCollection.updateOne({ _id: new ObjectId(id) }, { $set: { requestStatus: "rejected" } });
+
+    res.send({ success: true });
+  } catch (err) {
+    res.status(500).send({ message: "Failed to reject request", err });
+  }
+});
+
+
+// GET user info (role + status)
+app.get('/users/info/:email', verifyJWT, async (req, res) => {
+  const email = req.params.email;
+
+  if (email !== req.tokenEmail) {
+    return res.status(403).send({ message: 'Forbidden' });
+  }
+
+  const user = await usersCollection.findOne({ email });
+
+  res.send({
+    role: user?.role || 'user',
+    status: user?.status || 'active',
+  });
+});
+
+// ===== ADMIN STATISTICS =====
+// app.get('/admin/statistics', verifyJWT, async (req, res) => {
+//   try {
+//     // Check if requester is admin
+//     const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
+//     if (!adminUser || adminUser.role !== 'admin') {
+//       return res.status(403).send({ message: 'Forbidden' });
+//     }
+
+//     // Total Users
+//     const totalUsers = await usersCollection.countDocuments();
+
+//     // Total Orders
+//     const totalOrders = await ordersCollection.countDocuments();
+
+//     // Total Revenue (only paid orders)
+//     const revenueAgg = await ordersCollection.aggregate([
+//       { $match: { paymentStatus: 'paid' } },
+//       { $group: { _id: null, totalRevenue: { $sum: '$price' } } },
+//     ]).toArray();
+//     const totalRevenue = revenueAgg[0]?.totalRevenue || 0;
+
+//     // Total Plants / Meals
+//     const totalPlants = await foodCollection.countDocuments();
+
+//     res.send({
+//       totalUsers,
+//       totalOrders,
+//       totalRevenue,
+//       totalPlants
+//     });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).send({ message: 'Failed to fetch statistics', err });
+//   }
+// });
+// ===== ADMIN STATISTICS =====
+app.get('/admin/statistics', verifyJWT, async (req, res) => {
+  try {
+    // Check if requester is admin
+    const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).send({ message: 'Forbidden' });
+    }
+
+    // Total Users
+    const totalUsers = await usersCollection.countDocuments();
+
+    // Orders
+    const ordersPending = await ordersCollection.countDocuments({ orderStatus: 'pending' });
+    const ordersDelivered = await ordersCollection.countDocuments({ orderStatus: 'delivered' });
+    const totalOrders = await ordersCollection.countDocuments();
+
+    // Total Revenue (only paid orders)
+    const revenueAgg = await ordersCollection.aggregate([
+      { $match: { paymentStatus: 'paid' } },
+      { $group: { _id: null, totalRevenue: { $sum: '$price' } } },
+    ]).toArray();
+    const totalRevenue = revenueAgg[0]?.totalRevenue || 0;
+
+    // Total Plants / Meals
+    const totalPlants = await foodCollection.countDocuments();
+
+    res.send({
+      totalUsers,
+      totalOrders,
+      ordersPending,
+      ordersDelivered,
+      totalRevenue,
+      totalPlants
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: 'Failed to fetch statistics', err });
+  }
+});
+
 
 
 
